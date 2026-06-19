@@ -1,0 +1,13 @@
+# Render Blueprint — "New +" → "Blueprint" 로 이 저장소를 선택하면 자동 구성됩니다.
+services:
+  - type: web
+    name: samil-coffeechat
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node --experimental-sqlite server.js
+    envVars:
+      - key: ADMIN_KEY
+        value: samil-hr
+      - key: DEMO_REPLY_SECONDS   # 시연용: 신청 20초 뒤 자동 회신 (실서비스는 이 줄 삭제)
+        value: "20"
