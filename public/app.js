@@ -5,6 +5,11 @@ let LEADERS = [];
 let REQUESTS = [];
 let NOTIFS = [];
 let UNREAD = 0;
+let INCOMING = [];     // 나에게 온 동료 미팅 신청
+let CONNS = [];        // 수락된 연결(선배+동료)
+let PENDNET = [];      // 시각화 보조용 대기/거절 선배
+let TESTI = [];        // 우수 연결 후기
+let TIDX = 0;          // 후기 회전 인덱스
 
 const TEMPLATES = {
   formal:  s => `${s.name} 선배님께,\n\n안녕하세요. ${S.cohort} 신규 입사 예정자입니다. ${s.dept} 분야에서 쌓아오신 경험을 듣고 싶어 조심스럽게 커피챗을 신청드립니다. 짧게라도 시간 내어 주신다면 큰 배움이 될 것 같습니다.`,
@@ -17,7 +22,7 @@ const H = 3600e3, DAY = 24*H;
 function pendingCount(){ return REQUESTS.filter(r=>r.status==='pending').length; }
 function updateReqBadge(){
   const b = document.querySelector('[data-v="schedule"] .badge');
-  if(b){ const n=pendingCount(); b.textContent=n; b.style.display = n? '' : 'none'; }
+  if(b){ const n=pendingCount() + (INCOMING?INCOMING.length:0); b.textContent=n; b.style.display = n? '' : 'none'; }
 }
 function relLabel(ts){
   const d = Date.now()-ts;
@@ -64,6 +69,8 @@ function applyBootstrap(d){
     badges: l.courage>=100?['🔥','🤝','🎯']:l.courage>=55?['🤝','⚡']:['⚡'],
   }));
   NOTIFS = d.notifications||[]; UNREAD = d.unread||0;
+  INCOMING = d.incoming||[]; CONNS = d.connections||[]; PENDNET = d.pendingNet||[];
+  TESTI = d.testimonials||[];
   const me = d.me||{};
   S.courage=me.courage||0; S.level=me.level||1; S.next=d.nextLevel||30;
   S.name=me.name||''; S.cohort=me.cohort||'36기'; S.dept=me.dept||'Audit';
@@ -79,7 +86,7 @@ function paintMe(){
 /* ---------- nav ---------- */
 const TITLES = {
   discover:['오늘의 추천 선배','AI가 나와 결이 맞는 선배를 골라드려요'],
-  schedule:['내 일정','보낸 신청의 수락·거절 여부를 한눈에'],
+  schedule:['내 일정','받은 동료 신청과 보낸 신청을 한눈에'],
   network:['나의 네트워크 맵','용기로 연결한 사람들'],
   leaderboard:['이번 주 리더보드','용기 점수로 겨루는 동기들'],
 };
@@ -116,6 +123,24 @@ function render(){
 }
 
 /* ---------- DISCOVER ---------- */
+function renderTesti(){
+  if(!TESTI.length) return '<div class="t-empty">후기를 불러오는 중…</div>';
+  const t = TESTI[TIDX % TESTI.length];
+  const stars = '★'.repeat(t.rating)+'☆'.repeat(5-t.rating);
+  return `
+    <div class="testi">
+      <div class="t-pair">
+        <span class="t-av" style="background:linear-gradient(135deg,${t.jc1},${t.jc2})">${t.ju_i}</span>
+        <svg class="t-arrow" viewBox="0 0 24 24" fill="none"><path d="M5 12h12M12 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="t-av" style="background:linear-gradient(135deg,${t.sc1},${t.sc2})">${t.se_i}</span>
+        <div class="t-names"><b>${t.ju}</b> × <b>${t.se}</b> 선배<div class="t-dept">${t.dept}</div></div>
+      </div>
+      <div class="t-topic">☕ ${t.topic}<span class="t-stars">${stars}</span></div>
+      <div class="t-quote">“${t.quote}”</div>
+    </div>`;
+}
+function rotateTesti(){ TIDX=(TIDX+1)%Math.max(1,TESTI.length); const b=document.getElementById('testiBox'); if(b) b.innerHTML=renderTesti(); }
+
 function renderDiscover(){
   const s = SENIORS[S.cardIndex % SENIORS.length];
   view.innerHTML = `
@@ -178,6 +203,10 @@ function renderDiscover(){
           <div class="ico">🔥</div>
           <div class="x"><div class="n">3일 연속 도전 중</div><div class="s">오늘 1번만 더 신청하면 +10 pts</div></div>
         </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><div class="t">✨ 우수 연결 후기</div><div class="more" onclick="rotateTesti()">다른 후기 ›</div></div>
+        <div id="testiBox">${renderTesti()}</div>
       </div>
       <div class="panel">
         <div class="panel-h"><div class="t"><svg viewBox="0 0 24 24" fill="none"><path d="M7 20h10M9 20v-3m6 3v-3M6 4h12v4a6 6 0 0 1-12 0V4Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>이번 주 리더보드</div><div class="more">전체 ›</div></div>
@@ -244,6 +273,7 @@ async function applyCard(){
   const btn = $('#card .btn-apply');
   if(btn){ btn.disabled = true; btn.style.opacity = .6; }
   const msg = ($('#msgPrev') ? $('#msgPrev').textContent : '');
+  const animDone = playSendAnim(s);     // 용기 불꽃 + 편지 날아가기
   try{
     const d = await api('/requests','POST',{ seniorId:s.id, template:S.template, message:msg });
     // merge server truth
@@ -255,11 +285,39 @@ async function applyCard(){
       dept:`${r.senior.dept} · ${r.senior.years}년차`, seniorId:r.senior.id, fresh:true });
     syncCourage(); updateReqBadge();
     const win = Math.round((r.dueAt - r.sentAt)/H);
+    await animDone;
     showSent(s, win);
   }catch(e){
+    clearSendAnim();
     if(btn){ btn.disabled=false; btn.style.opacity=1; }
     toast('⚠️', e.message==='이미 신청한 선배예요' ? '이미 신청한 선배예요' : '신청 전송에 실패했어요');
   }
+}
+
+/* ---------- 신청 전송 애니메이션 (용기 불꽃 + 편지) ---------- */
+function clearSendAnim(){ const e=document.getElementById('sendAnim'); if(e) e.remove(); }
+function playSendAnim(s){
+  return new Promise(resolve=>{
+    clearSendAnim();
+    const ov=document.createElement('div'); ov.id='sendAnim'; ov.className='send-anim';
+    const sparks=Array.from({length:12}).map((_,i)=>{
+      const ang=(i/12)*Math.PI*2, d=80+Math.random()*70;
+      return `<span class="spark" style="--tx:${(Math.cos(ang)*d).toFixed(0)}px;--ty:${(Math.sin(ang)*d).toFixed(0)}px;animation-delay:${(0.12+Math.random()*0.22).toFixed(2)}s"></span>`;
+    }).join('');
+    ov.innerHTML=`
+      <div class="send-stage">
+        <div class="ring"></div>
+        <div class="flame">🔥</div>
+        ${sparks}
+        <div class="letter">✉️</div>
+        <div class="plus">+10 용기</div>
+      </div>
+      <div class="send-cap">용기를 담아 전송 중…</div>`;
+    document.body.appendChild(ov);
+    setTimeout(()=>{ const c=ov.querySelector('.send-cap'); if(c) c.textContent='전송 완료! 🎉'; }, 950);
+    setTimeout(()=>{ ov.classList.add('out'); }, 1300);
+    setTimeout(()=>{ clearSendAnim(); resolve(); }, 1560);
+  });
 }
 
 /* ---------- sent modal (응답 대기) ---------- */
@@ -404,48 +462,59 @@ function kpi(bg,fg,ico,v,l,d){
 /* ---------- NETWORK MAP ---------- */
 function renderNetwork(){
   const W=640,Hh=440,cx=W/2,cy=Hh/2;
-  const stateOf = r => r.status==='accepted'?'go':r.status==='pending'?'wait':'sent';
-  const items = REQUESTS.slice(0,7);
+  // 연결(수락)된 선배/동료 + 대기/거절 선배
+  const conns = CONNS.map(c=>({ ...c, state:'go' }));
+  const pend = PENDNET.map(c=>({ ...c, state: c.status==='pending'?'wait':'sent' }));
+  const items = [...conns, ...pend].slice(0,9);
   const n = items.length;
   const nodes=[{x:cx,y:cy,r:34,me:true,label:S.name||'나',c1:S.c1,c2:S.c2}];
-  items.forEach((r,i)=>{
+  items.forEach((c,i)=>{
     const ang = (-90 + i*(360/Math.max(1,n))) * Math.PI/180;
     const rad = 150 + (i%2?22:0);
     nodes.push({ x:cx+Math.cos(ang)*rad, y:cy+Math.sin(ang)*(rad*0.72),
-      r: r.status==='accepted'?24:20, label:r.name, sub:(r.dept||'').split(' ')[0],
-      state:stateOf(r), c1:r.c1, c2:r.c2 });
+      r: c.state==='go'?24:20, label:c.name, sub:c.dept||'',
+      state:c.state, kind:c.kind, c1:c.c1, c2:c.c2 });
   });
-  const col={go:'#1FA266',wait:'#F2A93B',sent:'#C9BEB0'};
+  // 엣지 색: 선배 연결=초록, 동료 연결=인디고, 대기=주황, 신청=흐림
+  const edgeCol = nd => nd.state!=='go' ? (nd.state==='wait'?'#F2A93B':'#C9BEB0')
+                      : (nd.kind==='peer'?'#5C6BC0':'#1FA266');
   let edges='';
   nodes.slice(1).forEach(nd=>{
     const dash = nd.state==='sent'?'stroke-dasharray="5 5"':'';
-    edges+=`<line x1="${cx}" y1="${cy}" x2="${nd.x}" y2="${nd.y}" stroke="${col[nd.state]}" stroke-width="${nd.state==='go'?2.6:2}" ${dash} opacity="${nd.state==='sent'?.5:.8}"/>`;
+    edges+=`<line x1="${cx}" y1="${cy}" x2="${nd.x}" y2="${nd.y}" stroke="${edgeCol(nd)}" stroke-width="${nd.state==='go'?2.6:2}" ${dash} opacity="${nd.state==='sent'?.5:.85}"/>`;
   });
   let circles='';
   nodes.forEach((nd,idx)=>{
+    const ringCol = nd.me?'#5C6BC0':edgeCol(nd);
+    const badge = (!nd.me && nd.state==='go')
+      ? `<circle cx="${nd.x+nd.r*0.78}" cy="${nd.y-nd.r*0.78}" r="8" fill="${nd.kind==='peer'?'#5C6BC0':'#1FA266'}" stroke="#fff" stroke-width="2"/>
+         <text x="${nd.x+nd.r*0.78}" y="${nd.y-nd.r*0.78+1}" text-anchor="middle" dominant-baseline="middle" font-size="9">${nd.kind==='peer'?'🧑':'✓'}</text>` : '';
     circles+=`
       <defs><linearGradient id="g_${idx}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${nd.c1}"/><stop offset="1" stop-color="${nd.c2}"/></linearGradient></defs>
-      <circle cx="${nd.x}" cy="${nd.y}" r="${nd.r+(nd.me?6:4)}" fill="${nd.me?'#5C6BC0':col[nd.state]}" opacity="${nd.me?.14:.12}"/>
+      <circle cx="${nd.x}" cy="${nd.y}" r="${nd.r+(nd.me?6:4)}" fill="${ringCol}" opacity="${nd.me?.14:.12}"/>
       <circle cx="${nd.x}" cy="${nd.y}" r="${nd.r}" fill="url(#g_${idx})" stroke="#fff" stroke-width="3"/>
       <text x="${nd.x}" y="${nd.y+(nd.me?2:1)}" text-anchor="middle" dominant-baseline="middle" fill="#fff" font-weight="800" font-size="${nd.me?16:13}" font-family="Pretendard,sans-serif">${(nd.label||'·')[0]}</text>
+      ${badge}
       <text x="${nd.x}" y="${nd.y+nd.r+15}" text-anchor="middle" fill="#2A231D" font-weight="800" font-size="12" font-family="Pretendard,sans-serif">${nd.label||''}</text>
       ${nd.sub?`<text x="${nd.x}" y="${nd.y+nd.r+30}" text-anchor="middle" fill="#A99D90" font-weight="600" font-size="10.5" font-family="Pretendard,sans-serif">${nd.sub}</text>`:''}`;
   });
-  const acc = REQUESTS.filter(r=>r.status==='accepted').length;
+  const accS = CONNS.filter(c=>c.kind==='senior').length;
+  const accP = CONNS.filter(c=>c.kind==='peer').length;
   const empty = n===0 ? '<div style="text-align:center;color:var(--ink-faint);font-size:13px;padding:40px 0">아직 연결이 없어요. ‘신청하기’에서 첫 용기를 내보세요!</div>' : '';
 
   view.innerHTML=`
   <div class="page-wrap">
     <div class="kpi-row" style="grid-template-columns:repeat(3,1fr)">
-      ${kpi('#E4F5EC','#1FA266','🤝',acc,'연결된 선배','커피챗 성사')}
+      ${kpi('#E4F5EC','#1FA266','🤝',accS,'연결된 선배','커피챗 성사')}
+      ${kpi('#EEF0FB','#5C6BC0','🧑‍🤝‍🧑',accP,'연결된 동료','동기 네트워크')}
       ${kpi('#FFF1DB','#F2A93B','⏳',pendingCount(),'수락 대기','응답 기다리는 중')}
-      ${kpi('#F5EEE5','#7A6F64','📤',REQUESTS.length,'신청 전송','내가 보낸 용기')}
     </div>
     <div class="netbox">
       <div class="net-head">
         <div class="t">용기로 만든 나의 네트워크</div>
         <div class="lg">
-          <span><i style="background:#1FA266"></i>연결됨</span>
+          <span><i style="background:#1FA266"></i>선배 연결</span>
+          <span><i style="background:#5C6BC0"></i>동료 연결</span>
           <span><i style="background:#F2A93B"></i>대기 중</span>
           <span><i style="background:#C9BEB0"></i>신청함</span>
         </div>
@@ -493,14 +562,33 @@ function renderRequests(){
   view.innerHTML=`
   <div class="page-wrap">
     <div class="kpi-row">
-      ${kpi('#FFE9E1','#EE5836','📨',REQUESTS.length,'보낸 신청','이번 주')}
+      ${kpi('#EEF0FB','#5C6BC0','📥',INCOMING.length,'받은 신청','동료 미팅 요청')}
       ${kpi('#FFF1DB','#F2A93B','⏳',pend,'응답 대기','회신 기다리는 중')}
-      ${kpi('#E4F5EC','#1FA266','🤝',acc,'수락됨','커피챗 확정')}
-      ${kpi('#F1ECE6','#9A8C7D','🌱',dec,'정중히 거절','용기 +15 적립')}
+      ${kpi('#E4F5EC','#1FA266','🤝',acc + CONNS.filter(c=>c.kind==='peer').length,'연결됨','커피챗 성사')}
+      ${kpi('#FFE9E1','#EE5836','📨',REQUESTS.length,'보낸 신청','이번 주')}
     </div>
+    ${INCOMING.length ? `
+    <div class="req-card incoming-card">
+      <div class="req-head">
+        <div class="t">📥 받은 동료 미팅 신청 <span class="inbadge">${INCOMING.length}</span></div>
+        <div class="lg muted">같은 기수·동료가 보낸 커피챗 신청이에요</div>
+      </div>
+      ${INCOMING.map(p=>`
+        <div class="req-row in-row">
+          <div class="av" style="background:linear-gradient(135deg,${p.from.c1},${p.from.c2})">${p.from.initial}</div>
+          <div class="x">
+            <div class="n">${p.from.name} <span class="when">${p.from.cohort||''} · ${p.from.dept||''}</span></div>
+            <div class="s">“${p.topic}”</div>
+          </div>
+          <div class="in-actions">
+            <button class="in-acc" onclick="respondPeer('${p.id}','accept')">수락</button>
+            <button class="in-dec" onclick="respondPeer('${p.id}','decline')">거절</button>
+          </div>
+        </div>`).join('')}
+    </div>` : ''}
     <div class="req-card">
       <div class="req-head">
-        <div class="t">신청 현황 · 수락/거절 대기</div>
+        <div class="t">📤 보낸 신청 · 수락/거절 대기</div>
         <div class="lg"><span><i style="background:#F2A93B"></i>대기</span><span><i style="background:#1FA266"></i>수락</span><span><i style="background:#C9BEB0"></i>거절</span></div>
       </div>
       ${REQUESTS.map(r=>{
@@ -526,6 +614,18 @@ function renderRequests(){
     </div>
   </div>`;
   REQUESTS.forEach(r=>r.fresh=false);
+}
+
+async function respondPeer(id, decision){
+  try{
+    const d = await api('/peer-requests/respond','POST',{ id, decision });
+    INCOMING = d.incoming||[]; if(d.connections) CONNS = d.connections;
+    S.courage=d.me.courage; S.level=d.me.level; S.next=d.nextLevel;
+    syncCourage(); updateReqBadge();
+    if(decision==='accept'){ confetti(); toast('🤝','동료와 연결됐어요! 용기 +20'); }
+    else toast('🙏','정중히 거절했어요');
+    renderRequests();
+  }catch(e){ toast('⚠️','처리에 실패했어요'); }
 }
 
 /* ---------- notifications UI ---------- */
@@ -575,6 +675,7 @@ async function poll(){
     renderNotifs();
     if(S.view==='schedule') renderRequests();
     else if(S.view==='leaderboard') renderLeaderboard();
+    else if(S.view==='network') renderNetwork();
     else if(S.view==='discover'){ /* keep card; just refreshed gauge */ }
   }catch(e){ if(e.status===401) logout(); }
 }
