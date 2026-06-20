@@ -1,25 +1,127 @@
-# ── 삼일 커피챗 서버 환경변수 (.env.example) ──
-# 복사해서 .env 로 쓰거나, 실행 시 앞에 붙여도 됩니다.
+// ─────────────────────────────────────────────────────────────
+//  db.js — 진짜 SQLite 데이터베이스 (Node 22 내장 node:sqlite)
+//  단일 파일(data/app.db)에 저장되며, 서버에 접속하는 모든 기기/사용자가
+//  같은 DB를 공유합니다. 운영 시 Postgres/MySQL로 바꾸려면 이 파일만 교체.
+// ─────────────────────────────────────────────────────────────
+const { DatabaseSync } = require('node:sqlite');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const { SENIORS, DEMO_JOINERS } = require('./seed-data');
 
-# 서버 포트
-PORT=3000
+const DATA_DIR = path.join(__dirname, '..', 'data');
+fs.mkdirSync(path.join(DATA_DIR, 'outbox'), { recursive: true });
 
-# HR 대시보드 접근 키 (/admin)
-ADMIN_KEY=samil-hr
+const db = new DatabaseSync(path.join(DATA_DIR, 'app.db'));
+db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 
-# 답장 시뮬레이터: 선배 회신을 자동 생성할지 (데모용). 끄려면 false
-SIMULATE_REPLIES=true
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  cohort TEXT,
+  dept TEXT,
+  role TEXT NOT NULL DEFAULT 'joiner',   -- joiner | hr
+  courage INTEGER NOT NULL DEFAULT 0,
+  level INTEGER NOT NULL DEFAULT 1,
+  c1 TEXT, c2 TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS seniors (
+  id TEXT PRIMARY KEY,
+  name TEXT, initial TEXT, dept TEXT, years INTEGER, loc TEXT,
+  rating REAL, lvl TEXT, hot TEXT, bio TEXT,
+  tags TEXT, topics TEXT,               -- JSON
+  c1 TEXT, c2 TEXT, email TEXT,
+  accept_rate REAL DEFAULT 0.65
+);
+CREATE TABLE IF NOT EXISTS requests (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  senior_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',  -- pending | accepted | declined
+  template TEXT, message TEXT,
+  sent_at INTEGER NOT NULL,
+  due_at INTEGER,
+  resolved_at INTEGER,
+  meet_at TEXT,
+  FOREIGN KEY(user_id) REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  type TEXT, title TEXT, body TEXT,
+  created_at INTEGER NOT NULL,
+  read INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS emails (
+  id TEXT PRIMARY KEY,
+  to_addr TEXT, to_name TEXT,
+  subject TEXT, body TEXT, kind TEXT,
+  transport TEXT, sent INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS peer_requests (
+  id TEXT PRIMARY KEY,
+  to_user_id TEXT NOT NULL,            -- 신청을 받는 사람(로그인 사용자)
+  from_user_id TEXT,                   -- 신청을 보낸 동료(데모 동기)
+  from_name TEXT, from_initial TEXT, from_dept TEXT, from_cohort TEXT,
+  from_c1 TEXT, from_c2 TEXT,
+  topic TEXT, message TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',  -- pending | accepted | declined
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  meet_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_req_user ON requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_req_status ON requests(status);
+CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_peer_to ON peer_requests(to_user_id);
+`);
 
-# 데모 모드: 신청 후 N초 뒤 자동 회신 (라이브 시연용). 비우면 실제 24~48시간
-# DEMO_REPLY_SECONDS=15
+const uid = (p = '') => p + crypto.randomBytes(6).toString('hex');
+const now = () => Date.now();
 
-# 실제 회신 대기 시간(시간 단위). DEMO_REPLY_SECONDS 가 없을 때 적용
-REPLY_MIN_HOURS=24
-REPLY_MAX_HOURS=48
+// ---------- seed (idempotent) ----------
+function seed() {
+  const cnt = db.prepare('SELECT COUNT(*) n FROM seniors').get().n;
+  if (cnt === 0) {
+    const ins = db.prepare(`INSERT INTO seniors
+      (id,name,initial,dept,years,loc,rating,lvl,hot,bio,tags,topics,c1,c2,email,accept_rate)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    for (const s of SENIORS) {
+      ins.run(s.id, s.name, s.initial, s.dept, s.years, s.loc, s.rating, s.lvl, s.hot, s.bio,
+        JSON.stringify(s.tags), JSON.stringify(s.topics), s.c1, s.c2, s.email, s.accept_rate);
+    }
+  }
+  // HR 관리자 계정
+  const hr = db.prepare('SELECT id FROM users WHERE role=?').get('hr');
+  if (!hr) {
+    db.prepare(`INSERT INTO users (id,email,name,cohort,dept,role,courage,level,c1,c2,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+      uid('u_'), 'hr@samil.example.com', '인사팀 (HR)', '-', 'People & L&D', 'hr', 0, 1, '#5C6BC0', '#7E8DE0', now());
+  }
+  // 데모 동기 (리더보드)
+  const jcnt = db.prepare("SELECT COUNT(*) n FROM users WHERE role='joiner'").get().n;
+  if (jcnt === 0) {
+    const ins = db.prepare(`INSERT INTO users (id,email,name,cohort,dept,role,courage,level,c1,c2,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    DEMO_JOINERS.forEach((j, i) => {
+      ins.run(uid('u_'), `demo${i}@samil.example.com`, j.name, j.cohort, j.dept, 'joiner',
+        j.courage, levelFor(j.courage), j.c1, j.c2, now() - (i + 1) * 36e5);
+    });
+  }
+}
 
-# ── 실제 이메일 발송 (선택) ──
-# 아래를 채우고 `npm i nodemailer` 하면 진짜 메일이 나갑니다.
-# 비워두면 data/outbox/*.eml 파일 + 인앱 알림으로만 동작(설치 불필요).
-# 예: SMTP_URL=smtps://user:pass@smtp.gmail.com:465
-# SMTP_URL=
-# MAIL_FROM=삼일 커피챗 <no-reply@samil.example.com>
+// ---------- level helpers ----------
+function nextLevelPts(level) { return [0, 30, 55, 85, 120, 160, 210][level] || 999; }
+function levelFor(courage) { let l = 1; while (courage >= nextLevelPts(l)) l++; return l; }
+
+// ---------- row parsers ----------
+function parseSenior(r) {
+  if (!r) return r;
+  return { ...r, tags: JSON.parse(r.tags || '[]'), topics: JSON.parse(r.topics || '[]') };
+}
+
+module.exports = { db, uid, now, seed, nextLevelPts, levelFor, parseSenior };
